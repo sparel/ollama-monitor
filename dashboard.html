@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ollama Monitor</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg: #0f1117;
+  --card: #1a1d27;
+  --border: #2a2d3a;
+  --text: #e0e3f0;
+  --muted: #7a7f9a;
+  --green: #4ade80;
+  --blue: #60a5fa;
+  --orange: #fb923c;
+  --red: #f87171;
+  --purple: #a78bfa;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 14px;
+  padding: 20px;
+}
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 24px;
+}
+h1 { font-size: 1.4rem; font-weight: 600; color: var(--green); }
+.status-badge {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 0.8rem; color: var(--muted);
+}
+.dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--green);
+}
+.dot.offline { background: var(--red); }
+.dot.loading { background: var(--orange); animation: pulse 1s infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+/* ── Quick Stats Row ── */
+.stats-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.stat-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+}
+.stat-label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
+.stat-value { font-size: 1.8rem; font-weight: 700; color: var(--text); }
+.stat-value.green { color: var(--green); }
+.stat-value.blue { color: var(--blue); }
+.stat-sub { font-size: 0.75rem; color: var(--muted); margin-top: 4px; }
+.stat-bar-wrap { margin-top: 8px; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+.stat-bar { height: 100%; background: var(--green); border-radius: 2px; transition: width 0.5s ease; }
+
+/* ── Charts Grid ── */
+.charts-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.chart-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+}
+.chart-card h3 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: var(--text);
+}
+canvas { max-height: 220px; }
+
+/* ── Tables / HW ── */
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+}
+.card h3 { font-size: 0.85rem; font-weight: 600; margin-bottom: 12px; }
+table { width: 100%; border-collapse: collapse; }
+th {
+  text-align: left;
+  font-size: 0.72rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0 8px 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+td {
+  padding: 6px 8px 6px 0;
+  font-size: 0.8rem;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+tr:last-child td { border-bottom: none; }
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+.badge.ok { background: rgba(74,222,128,0.15); color: var(--green); }
+.badge.err { background: rgba(248,113,113,0.15); color: var(--red); }
+
+/* ── HW Cards ── */
+.hw-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+.hw-item {
+  background: rgba(255,255,255,0.03);
+  border-radius: 8px;
+  padding: 12px;
+}
+.hw-label { font-size: 0.7rem; color: var(--muted); margin-bottom: 4px; }
+.hw-value { font-size: 1.1rem; font-weight: 600; }
+.hw-value.hot { color: var(--red); }
+.hw-value.warm { color: var(--orange); }
+.hw-value.cool { color: var(--green); }
+.hw-bar-wrap { height: 3px; background: var(--border); border-radius: 2px; margin-top: 6px; overflow: hidden; }
+.hw-bar { height: 100%; border-radius: 2px; transition: width 0.5s ease; }
+
+/* ── Token + Latency ── */
+.three-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
+}
+@media (max-width: 900px) {
+  .charts-grid, .two-col, .three-col { grid-template-columns: 1fr; }
+}
+.last-updated { font-size: 0.72rem; color: var(--muted); text-align: right; margin-top: 8px; }
+
+/* chart container sizing */
+.chart-wrap { position: relative; height: 200px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>♜ Ollama Monitor</h1>
+  <div class="status-badge">
+    <div class="dot" id="statusDot"></div>
+    <span id="statusText">Connecting…</span>
+  </div>
+</header>
+
+<!-- Quick Stats -->
+<div class="stats-row">
+  <div class="stat-card">
+    <div class="stat-label">Requests (24h)</div>
+    <div class="stat-value green" id="statRequests">—</div>
+    <div class="stat-sub" id="statSubRequests"></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Avg TTFT</div>
+    <div class="stat-value blue" id="statTTFT">—</div>
+    <div class="stat-sub">ms to first token</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Avg t/s</div>
+    <div class="stat-value" id="statTPS">—</div>
+    <div class="stat-sub">tokens per second</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">GPU Utilization</div>
+    <div class="stat-value" id="statGPU">—</div>
+    <div class="stat-bar-wrap">
+      <div class="stat-bar" id="statGPUBar" style="width:0%"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Charts: Volume + Model Distribution -->
+<div class="charts-grid">
+  <div class="chart-card">
+    <h3>Request Volume (24h)</h3>
+    <div class="chart-wrap"><canvas id="chartVolume"></canvas></div>
+  </div>
+  <div class="chart-card">
+    <h3>Model Distribution</h3>
+    <div class="chart-wrap"><canvas id="chartModel"></canvas></div>
+  </div>
+</div>
+
+<!-- HW Monitoring + Recent Requests -->
+<div class="two-col">
+  <div class="card">
+    <h3>Hardware Monitoring</h3>
+    <div class="hw-grid">
+      <div class="hw-item">
+        <div class="hw-label">GPU Temp</div>
+        <div class="hw-value" id="hwTemp">—</div>
+        <div class="hw-bar-wrap"><div class="hw-bar" id="hwTempBar" style="width:0%;background:var(--green)"></div></div>
+      </div>
+      <div class="hw-item">
+        <div class="hw-label">GPU Util</div>
+        <div class="hw-value" id="hwGPUUtil">—</div>
+        <div class="hw-bar-wrap"><div class="hw-bar" id="hwGPUUtilBar" style="width:0%;background:var(--blue)"></div></div>
+      </div>
+      <div class="hw-item">
+        <div class="hw-label">GPU Power</div>
+        <div class="hw-value" id="hwPower">—</div>
+      </div>
+      <div class="hw-item">
+        <div class="hw-label">CPU Util</div>
+        <div class="hw-value" id="hwCPU">—</div>
+        <div class="hw-bar-wrap"><div class="hw-bar" id="hwCPUBar" style="width:0%;background:var(--orange)"></div></div>
+      </div>
+      <div class="hw-item">
+        <div class="hw-label">RAM Used</div>
+        <div class="hw-value" id="hwRAM">—</div>
+        <div class="hw-bar-wrap"><div class="hw-bar" id="hwRAMBar" style="width:0%;background:var(--purple)"></div></div>
+      </div>
+      <div class="hw-item">
+        <div class="hw-label">Disk Used</div>
+        <div class="hw-value" id="hwDisk">—</div>
+        <div class="hw-bar-wrap"><div class="hw-bar" id="hwDiskBar" style="width:0%;background:var(--muted)"></div></div>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <h3>Recent Requests</h3>
+    <table id="recentTable">
+      <thead>
+        <tr>
+          <th>Model</th>
+          <th>Tokens</th>
+          <th>TTFT</th>
+          <th>t/s</th>
+          <th>Status</th>
+          <th>Time</th>
+        </tr>
+      </thead>
+      <tbody id="recentBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Token + Latency -->
+<div class="three-col">
+  <div class="chart-card">
+    <h3>Token Usage (7d)</h3>
+    <div class="chart-wrap"><canvas id="chartTokens"></canvas></div>
+  </div>
+  <div class="chart-card">
+    <h3>TTFT Distribution</h3>
+    <div class="chart-wrap"><canvas id="chartTTFT"></canvas></div>
+  </div>
+  <div class="chart-card">
+    <h3>Total Latency Distribution</h3>
+    <div class="chart-wrap"><canvas id="chartLatency"></canvas></div>
+  </div>
+</div>
+
+<div class="last-updated">Last updated: <span id="lastUpdated">—</span></div>
+
+<script>
+const API = window.location.origin;
+let volChart, modelChart, tokenChart, ttftChart, latChart;
+
+// ── color helpers ────────────────────────────────────────────────────────────
+function tempColor(t) {
+  if (t == null) return 'var(--muted)';
+  return t > 85 ? 'var(--red)' : t > 70 ? 'var(--orange)' : 'var(--green)';
+}
+function barColor(v, max) {
+  if (v == null) return 'var(--muted)';
+  return v / max > 0.85 ? 'var(--red)' : v / max > 0.6 ? 'var(--orange)' : 'var(--green)';
+}
+const fmt = (n, d = 1) => n == null ? '—' : n.toFixed(d);
+
+// ── charts ─────────────────────────────────────────────────────────────────
+const CHART_COLORS = ['#4ade80','#60a5fa','#fb923c','#f87171','#a78bfa','#34d399','#fbbf24'];
+
+function initCharts() {
+  volChart = new Chart(document.getElementById('chartVolume'), {
+    type: 'line',
+    data: { labels: [], datasets: [{ label: 'Requests', data: [], borderColor: '#4ade80', backgroundColor: 'rgba(74,222,128,0.1)', fill: true, tension: 0.4 }] },
+    options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}}, scales:{x:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#7a7f9a',font:{size:10}}},y:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#7a7f9a',font:{size:10}}}}}
+  });
+  modelChart = new Chart(document.getElementById('chartModel'), {
+    type: 'doughnut',
+    data: { labels: [], datasets: [{ data: [], backgroundColor: CHART_COLORS }] },
+    options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{position:'bottom',labels:{color:'#7a7f9a',font:{size:11}}}}}
+  });
+  tokenChart = new Chart(document.getElementById('chartTokens'), {
+    type: 'bar',
+    data: { labels: [], datasets: [
+      { label: 'Prompt', data: [], backgroundColor: '#60a5fa' },
+      { label: 'Response', data: [], backgroundColor: '#4ade80' }
+    ] },
+    options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{labels:{color:'#7a7f9a',font:{size:11}}}}, scales:{x:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#7a7f9a',font:{size:10}}},y:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#7a7f9a',font:{size:10}}}}}
+  });
+  ttftChart = new Chart(document.getElementById('chartTTFT'), {
+    type: 'bar',
+    data: { labels: [], datasets: [{ label: 'TTFT (ms)', data: [], backgroundColor: '#60a5fa' }] },
+    options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}}, scales:{x:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#7a7f9a',font:{size:10}}},y:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#7a7f9a',font:{size:10}}}}}
+  });
+  latChart = new Chart(document.getElementById('chartLatency'), {
+    type: 'bar',
+    data: { labels: [], datasets: [{ label: 'Latency (ms)', data: [], backgroundColor: '#fb923c' }] },
+    options: { responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}}, scales:{x:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#7a7f9a',font:{size:10}}},y:{grid:{color:'rgba(255,255,255,0.05)'},ticks:{color:'#7a7f9a',font:{size:10}}}}}
+  });
+}
+
+// ── refresh ─────────────────────────────────────────────────────────────────
+let healthHist = [];
+async function refresh() {
+  try {
+    const [stats, requests, health, volume, dist, tokens] = await Promise.all([
+      fetchJSON('/api/stats'),
+      fetchJSON('/api/requests?limit=50'),
+      fetchJSON('/api/health'),
+      fetchJSON('/api/volume?hours=24'),
+      fetchJSON('/api/distribution?hours=24'),
+      fetchJSON('/api/tokens?days=7'),
+    ]);
+    setStatus('online');
+
+    // Quick stats
+    document.getElementById('statRequests').textContent = stats.total_requests || 0;
+    document.getElementById('statTTFT').textContent = fmt(stats.avg_ttft_ms) + ' ms';
+    document.getElementById('statTPS').textContent = fmt(stats.avg_tps);
+    const gpuUtil = health.gpu_util;
+    document.getElementById('statGPU').textContent = gpuUtil != null ? gpuUtil.toFixed(0) + ' %' : '—';
+    document.getElementById('statGPUBar').style.width = (gpuUtil || 0) + '%';
+
+    // HW
+    setHW('hwTemp', health.gpu_temp, '°C', 100, true);
+    document.getElementById('hwTemp').style.color = tempColor(health.gpu_temp);
+    document.getElementById('hwTempBar').style.width = Math.min(health.gpu_temp || 0, 100) + '%';
+    document.getElementById('hwTempBar').style.background = tempColor(health.gpu_temp);
+    setHW('hwGPUUtil', health.gpu_util, ' %', 100);
+    document.getElementById('hwGPUUtilBar').style.width = (health.gpu_util || 0) + '%';
+    document.getElementById('hwGPUUtilBar').style.background = barColor(health.gpu_util, 100);
+    document.getElementById('hwPower').textContent = health.gpu_power_draw != null ? health.gpu_power_draw.toFixed(0) + ' W' : '—';
+    setHW('hwCPU', health.cpu_util, ' %', 100);
+    document.getElementById('hwCPUBar').style.width = (health.cpu_util || 0) + '%';
+    const memPct = health.mem_total ? (health.mem_used / health.mem_total * 100) : 0;
+    document.getElementById('hwRAM').textContent = health.mem_used ? (health.mem_used / 1024).toFixed(0) + ' / ' + (health.mem_total / 1024).toFixed(0) + ' GB' : '—';
+    document.getElementById('hwRAMBar').style.width = memPct + '%';
+    const diskPct = health.disk_total ? (health.disk_used / health.disk_total * 100) : 0;
+    document.getElementById('hwDisk').textContent = health.disk_used ? health.disk_used.toFixed(0) + ' / ' + health.disk_total.toFixed(0) + ' GB' : '—';
+    document.getElementById('hwDiskBar').style.width = diskPct + '%';
+
+    // Recent requests table
+    const tbody = document.getElementById('recentBody');
+    tbody.innerHTML = '';
+    (requests || []).slice(0, 20).forEach(r => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${shortModel(r.model)}</td>
+        <td>${r.total_tokens || '—'}</td>
+        <td>${r.ttft_ms != null ? r.ttft_ms.toFixed(0) + ' ms' : '—'}</td>
+        <td>${r.tps != null ? r.tps.toFixed(1) : '—'}</td>
+        <td><span class="badge ${r.status === 'ok' ? 'ok' : 'err'}">${r.status}</span></td>
+        <td>${relTime(r.timestamp)}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+
+    // Volume chart
+    volChart.data.labels = (volume || []).map(v => timeLabel(v.bucket));
+    volChart.data.datasets[0].data = (volume || []).map(v => v.count);
+    volChart.update('none');
+
+    // Model distribution
+    modelChart.data.labels = (dist || []).map(d => shortModel(d.model));
+    modelChart.data.datasets[0].data = (dist || []).map(d => d.count);
+    modelChart.update('none');
+
+    // Token usage
+    tokenChart.data.labels = (tokens || []).map(t => t.day);
+    tokenChart.data.datasets[0].data = (tokens || []).map(t => t.prompt || 0);
+    tokenChart.data.datasets[1].data = (tokens || []).map(t => t.response || 0);
+    tokenChart.update('none');
+
+    // TTFT histogram from requests
+    const ttftVals = (requests || []).slice(0, 50).map(r => r.ttft_ms).filter(v => v != null);
+    updateHistChart(ttftChart, ttftVals, 'TTFT (ms)');
+
+    // Latency histogram
+    const latVals = (requests || []).slice(0, 50).map(r => r.total_ms).filter(v => v != null);
+    updateHistChart(latChart, latVals, 'Latency (ms)');
+
+    document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString();
+  } catch (e) {
+    setStatus('offline');
+    console.error('refresh error', e);
+  }
+}
+
+function updateHistChart(chart, values, label) {
+  if (!values.length) { chart.data.labels = []; chart.data.datasets[0].data = []; chart.update('none'); return; }
+  const buckets = mkBuckets(values, 10);
+  chart.data.labels = buckets.map(b => b.label);
+  chart.data.datasets[0].data = buckets.map(b => b.count);
+  chart.update('none');
+}
+
+function mkBuckets(arr, n) {
+  if (!arr.length) return [];
+  const min = Math.min(...arr), max = Math.max(...arr);
+  if (min === max) return [{ label: min.toFixed(0), count: arr.length }];
+  const step = (max - min) / n;
+  return Array.from({length: n}, (_, i) => {
+    const lo = min + i * step, hi = min + (i+1) * step;
+    return {
+      label: `${lo.toFixed(0)}-${hi.toFixed(0)}`,
+      count: arr.filter(v => v >= lo && (i === n-1 ? v <= hi : v < hi)).length
+    };
+  });
+}
+
+function setHW(id, val, suffix, max, isTemp) {
+  const el = document.getElementById(id);
+  if (val == null) { el.textContent = '—'; return; }
+  el.textContent = val.toFixed(0) + suffix;
+  el.style.color = isTemp ? tempColor(val) : barColor(val, max);
+}
+
+function shortModel(m) {
+  if (!m) return '—';
+  return m.length > 20 ? m.substring(0, 18) + '…' : m;
+}
+
+function timeLabel(ts) {
+  if (!ts) return '';
+  try {
+    const d = new Date(ts);
+    return d.getHours() + ':00';
+  } catch { return ts; }
+}
+
+function relTime(ts) {
+  if (!ts) return '—';
+  try {
+    const d = new Date(ts), now = new Date();
+    const diff = Math.floor((now - d) / 1000);
+    if (diff < 60) return diff + 's ago';
+    if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+    if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+    return ts.slice(0, 10);
+  } catch { return ts; }
+}
+
+async function fetchJSON(url) {
+  const r = await fetch(API + url);
+  if (!r.ok) return null;
+  return r.json();
+}
+
+function setStatus(s) {
+  const dot = document.getElementById('statusDot');
+  const txt = document.getElementById('statusText');
+  dot.className = 'dot ' + (s === 'online' ? '' : s === 'loading' ? 'loading' : 'offline');
+  txt.textContent = s === 'online' ? 'Live' : s === 'loading' ? 'Loading…' : 'Offline';
+}
+
+// ── init ────────────────────────────────────────────────────────────────────
+initCharts();
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>
