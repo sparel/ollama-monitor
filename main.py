@@ -38,7 +38,9 @@ app = FastAPI(title="Ollama Monitor")
 def _poll_health():
     models = health.get_ollama_models()
     ollama_model = models[0]["name"] if models else None
-    ollama_model_size = models[0].get("size", 0) / (1024**3) if models and "size" in models[0] else None
+    ollama_model_size = (
+        models[0].get("size", 0) / (1024**3) if models and "size" in models[0] else None
+    )
     h = health.get_system_health(ollama_model, ollama_model_size)
     db.insert_health(
         gpu_name=h["gpu_name"],
@@ -56,6 +58,7 @@ def _poll_health():
         ollama_model_size=h["ollama_model_size"],
     )
 
+
 def _health_loop():
     while True:
         try:
@@ -64,6 +67,7 @@ def _health_loop():
             print(f"[health] poll error: {e}")
         time.sleep(HEALTH_INTERVAL)
 
+
 _health_thread = threading.Thread(target=_health_loop, daemon=True)
 _health_thread.start()
 
@@ -71,84 +75,95 @@ _health_thread.start()
 _event_queue: asyncio.Queue = asyncio.Queue()
 
 
+# ── SSE line parser ────────────────────────────────────────────────────────────
+def _parse_sse_line(line: str):
+    """
+    Parse an SSE data line. Ollama can emit:
+      - '{"model":...}'   (no prefix, raw JSON)
+      - 'data:{"model":...}'  (standard SSE prefix)
+    Returns the JSON object, or None.
+    """
+    raw = line
+    if raw.startswith("data:"):
+        raw = raw[5:]
+    raw = raw.strip()
+    if not raw or raw == "[DONE]":
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
 # ── proxy: stream + log ────────────────────────────────────────────────────────
 async def _proxy_stream(request: Request, path: str):
     """
-    Forward to Ollama, intercept SSE, measure TTFT, log to DB.
-    DB insert happens AFTER the stream finishes (client already has full response).
-    Uses Ollama's own eval_count / prompt_eval_count for accurate token counts.
+    Forward to Ollama, intercept SSE, measure TTFT.
+    Uses Ollama's own eval_count / prompt_eval_count from the done=true chunk.
+    DB insert happens here (before StreamingResponse) so it's synchronous with
+    the request lifecycle.
     """
     body = await request.json()
     model = body.get("model", "unknown")
     client_ip = request.client.host if request.client else "unknown"
     t0 = time.perf_counter()
     ttft_ms = None
-    prompt_tokens = 0
-    response_tokens = 0
-    total_ms = None
+    done_chunk = {}
 
-    async def generator():
-        nonlocal ttft_ms, prompt_tokens, response_tokens, total_ms
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(300.0, connect=15.0),
-            limits=httpx.Limits(max_keepalive_connections=1),
-        ) as client:
-            async with client.stream("POST", f"{OLLAMA_URL}{path}", json=body) as resp:
-                async for raw_line in resp.aiter_lines():
-                    line = raw_line.rstrip()
-                    if not line or line == "[DONE]":
-                        yield line
-                        continue
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(300.0, connect=15.0),
+        limits=httpx.Limits(max_keepalive_connections=1),
+    ) as client:
+        async with client.stream("POST", f"{OLLAMA_URL}{path}", json=body) as resp:
+            collected = []
+            async for raw_line in resp.aiter_lines():
+                line = raw_line.rstrip()
+                collected.append(line)
+                if not line or line == "[DONE]":
+                    continue
 
-                    if line.startswith("data:"):
-                        data_str = line[5:].strip()
-                        if data_str and data_str != "[DONE]":
-                            try:
-                                chunk = json.loads(data_str)
-                                # TTFT: first chunk with actual response content
-                                if ttft_ms is None and chunk.get("response"):
-                                    ttft_ms = (time.perf_counter() - t0) * 1000
+                chunk = _parse_sse_line(line)
+                if chunk is None:
+                    continue
 
-                                # done=true chunk has final metrics
-                                if chunk.get("done"):
-                                    prompt_tokens = chunk.get("prompt_eval_count", 0)
-                                    response_tokens = chunk.get("eval_count", 0)
-                                    total_ms = (time.perf_counter() - t0) * 1000
-                            except json.JSONDecodeError:
-                                pass
+                # TTFT: first chunk with actual response content
+                if ttft_ms is None and chunk.get("response"):
+                    ttft_ms = (time.perf_counter() - t0) * 1000
 
-                    yield line
+                # Capture done chunk (has eval_count, prompt_eval_count, total_duration)
+                if chunk.get("done"):
+                    done_chunk = chunk
 
-    async def wrapped():
-        nonlocal prompt_tokens, response_tokens, total_ms, ttft_ms
-        lines_seen = 0
-        async for line in generator():
-            lines_seen += 1
-            yield line
-        Path('/tmp/wrapped_done').write_text(
-            f'lines={lines_seen} prompt={prompt_tokens} resp={response_tokens} ttft={ttft_ms}ms total={total_ms}ms\n'
+    # Extract metrics from done chunk
+    prompt_tokens = done_chunk.get("prompt_eval_count", 0)
+    response_tokens = done_chunk.get("eval_count", 0)
+    total_ms = (time.perf_counter() - t0) * 1000
+
+    # Log to DB
+    try:
+        db.insert_request(
+            model=model,
+            prompt_tokens=prompt_tokens,
+            response_tokens=max(response_tokens, 1),
+            ttft_ms=ttft_ms,
+            total_ms=total_ms,
+            client_ip=client_ip,
+            status="ok",
         )
-        # Stream consumed — now log to DB
-        try:
-            tps = (response_tokens / total_ms * 1000) if total_ms and total_ms > 0 else 0
-            db.insert_request(
-                model=model,
-                prompt_tokens=prompt_tokens,
-                response_tokens=max(response_tokens, 1),
-                ttft_ms=ttft_ms,
-                total_ms=total_ms,
-                client_ip=client_ip,
-                status="ok",
-            )
-            await _event_queue.put({
-                "type": "request",
-                "model": model,
-                "timestamp": datetime.utcnow().isoformat(),
-            })
-        except Exception as e:
-            print(f"[db] insert error: {e}")
+        await _event_queue.put({
+            "type": "request",
+            "model": model,
+            "timestamp": datetime.utcnow().isoformat(),
+        })
+    except Exception as e:
+        print(f"[db] insert error: {e}")
 
-    return StreamingResponse(wrapped(), media_type="text/event-stream")
+    # Stream back collected lines
+    async def re_stream():
+        for line in collected:
+            yield line
+
+    return StreamingResponse(re_stream(), media_type="text/event-stream")
 
 
 # ── API routes ─────────────────────────────────────────────────────────────────
@@ -194,6 +209,7 @@ async def requests_stream():
         while True:
             payload = await _event_queue.get()
             yield {"event": "update", "data": json.dumps(payload)}
+
     return EventSourceResponse(gen())
 
 
@@ -212,7 +228,7 @@ def tokens(days: int = 7):
     return db.get_daily_tokens(days)
 
 
-# ── dashboard (before catch-all) ────────────────────────────────────────────────
+# ── dashboard ───────────────────────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
     return (Path(__file__).parent / "dashboard.html").read_text()
@@ -235,11 +251,17 @@ async def ollama_proxy(path: str, request: Request):
     async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
         url = f"{OLLAMA_URL}/{path}"
         body = await request.body()
-        headers = {k: v for k, v in request.headers.items()
-                   if k.lower() not in ("host", "content-length")}
+        headers = {
+            k: v
+            for k, v in request.headers.items()
+            if k.lower() not in ("host", "content-length")
+        }
         resp = await client.request(request.method, url, content=body, headers=headers)
-        return Response(content=resp.content, status_code=resp.status_code,
-                       headers=dict(resp.headers))
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            headers=dict(resp.headers),
+        )
 
 
 # ── startup ────────────────────────────────────────────────────────────────────
